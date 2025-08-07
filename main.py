@@ -1,4 +1,4 @@
-# main.py
+import uvicorn
 from fastapi import FastAPI, Request, HTTPException, Header
 from pydantic import BaseModel
 from typing import List, Optional
@@ -10,20 +10,26 @@ import os
 from sentence_transformers import SentenceTransformer
 import google.generativeai as genai
 
+from threading import Lock
+
 # Auth Token (Hardcoded for challenge purposes)
 AUTH_TOKEN = "14a917b2d58d35c9741f65d698be1f787283b1d8b606f4b121aeaacc51844167"
 
 app = FastAPI()
-model = SentenceTransformer("all-MiniLM-L6-v2")
 
-# Gemini API setup
-# Replace in production
-genai.configure(api_key="AIzaSyBiIO4RIrlSA_jhEcI99YPCBRWkZhNxkyA")
-gemini_model = genai.GenerativeModel("gemini-2.5-pro")
-
-# In-memory index storage (replace with DB in production)
+# Lazy globals
+model = None
+gemini_model = None
 index = None
 chunks = []
+lock = Lock()  # Ensure thread-safe lazy init
+
+# Environment-safe port binding
+
+
+@app.on_event("startup")
+def configure_genai():
+    genai.configure(api_key="AIzaSyBiIO4RIrlSA_jhEcI99YPCBRWkZhNxkyA")
 
 
 class QueryRequest(BaseModel):
@@ -44,7 +50,8 @@ async def run_submission(payload: QueryRequest, Authorization: Optional[str] = H
     questions = payload.questions
 
     global index, chunks
-    # Step 1: Download and write PDF to a temp file (Windows-compatible)
+
+    # Step 1: Download PDF to temp
     try:
         response = requests.get(doc_url)
         response.raise_for_status()
@@ -75,7 +82,25 @@ async def run_submission(payload: QueryRequest, Authorization: Optional[str] = H
 
     return {"answers": answers}
 
-# Utility Functions
+
+# ============ Utility Functions ==============
+
+def get_model():
+    global model
+    if model is None:
+        with lock:
+            if model is None:
+                model = SentenceTransformer("all-MiniLM-L6-v2")
+    return model
+
+
+def get_gemini_model():
+    global gemini_model
+    if gemini_model is None:
+        with lock:
+            if gemini_model is None:
+                gemini_model = genai.GenerativeModel("gemini-2.5-pro")
+    return gemini_model
 
 
 def extract_chunks_from_pdf(pdf_path, max_len=400):
@@ -89,7 +114,8 @@ def extract_chunks_from_pdf(pdf_path, max_len=400):
 
 
 def build_faiss_index(text_chunks):
-    embeddings = model.encode(text_chunks)
+    embedder = get_model()
+    embeddings = embedder.encode(text_chunks)
     dim = embeddings[0].shape[0]
     faiss_index = faiss.IndexFlatL2(dim)
     faiss_index.add(embeddings)
@@ -98,7 +124,8 @@ def build_faiss_index(text_chunks):
 
 def search_chunks(query, top_k=5):
     global index, chunks
-    query_vec = model.encode([query])
+    embedder = get_model()
+    query_vec = embedder.encode([query])
     _, I = index.search(query_vec, top_k)
     return [chunks[i] for i in I[0]]
 
@@ -116,7 +143,14 @@ And using these relevant policy clauses:
 Answer clearly and completely in 1-2 sentences. If no relevant info, say "Not mentioned in the document."
 """
     try:
-        response = gemini_model.generate_content(prompt)
+        gemini = get_gemini_model()
+        response = gemini.generate_content(prompt)
         return response.text.strip() if hasattr(response, "text") else "Error generating response."
     except Exception as e:
         return f"Error from Gemini: {str(e)}"
+
+
+# Optional: Run for local testing
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port)
