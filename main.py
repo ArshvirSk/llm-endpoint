@@ -41,6 +41,11 @@ class AnswerResponse(BaseModel):
     answers: List[str]
 
 
+@app.get("/")
+def root():
+    return {"status": "running"}
+
+
 @app.post("/api/v1/hackrx/run", response_model=AnswerResponse)
 async def run_submission(payload: QueryRequest, Authorization: Optional[str] = Header(None)):
     if Authorization != f"Bearer {AUTH_TOKEN}":
